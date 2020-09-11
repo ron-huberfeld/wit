@@ -23,6 +23,7 @@ class Commends:
     COMMIT = 'commit'
     STATUS = 'status'
     RM = 'rm'
+    CHECKOUT = 'checkout'
 
     def __init__(self) -> None:
         self.INIT
@@ -30,6 +31,7 @@ class Commends:
         self.COMMIT
         self.STATUS
         self.RM
+        self.CHECKOUT
 
 
 def detect_changes(f):
@@ -170,10 +172,10 @@ def create_commit_id_folder(images_path, commit_id):
     return commit_path
 
 
-def create_reference_file(wit_root_path, commit_id):
+def create_reference_file(wit_root_path, head, master):
     ref_path = os.path.join(wit_root_path, 'references.txt')
     with open(ref_path, 'w') as fh:
-        data = "HEAD={}\nmaster={}\n".format(commit_id, commit_id)
+        data = "HEAD={}\nmaster={}\n".format(head, master)
         fh.write(data)
 
 
@@ -195,7 +197,16 @@ def commit(message):
     # Part III - save staging content
     copy_tree(staging_path, commit_path)
     # Part IV - manage reference data
-    create_reference_file(wit_root_path, commit_id)
+    ref_path = os.path.join(wit_root_path, 'references.txt')
+    if os.path.exists(ref_path):
+        head = parse_reference_file(ref_path).get('HEAD')
+        master = parse_reference_file(ref_path).get('master')
+        if head == master:
+            create_reference_file(wit_root_path, commit_id, commit_id)
+        else:
+            create_reference_file(wit_root_path, commit_id, master)
+    else:
+        create_reference_file(wit_root_path, commit_id, commit_id)
 
 
 def get_modified_files(dcmp):
@@ -316,6 +327,79 @@ def rm(paths):
         handle_path_removal(wit_root_path, path_item)
 
 
+def merge_override_tree(sourceRoot, destRoot):
+    # https://stackoverflow.com/questions/22588225/how-do-you-merge-two-directories-or-move-with-replace-from-the-windows-command
+    ''' Updates destination and override existing files.
+
+    Args:
+        sourceRoot: source root folder of files to copy
+        destRoot:   Destination root folder for files to be created
+    '''
+    for path, _, files in os.walk(sourceRoot):
+        relPath = os.path.relpath(path, sourceRoot)
+        destPath = os.path.join(destRoot, relPath)
+        if not os.path.exists(destPath):
+            try:
+                os.makedirs(destPath)
+            except OSError as err:
+                raise err
+        for file in files:
+            destFile = os.path.join(destPath, file)
+            srcFile = os.path.join(path, file)
+            shutil.copy(srcFile, destFile)
+
+
+def is_commit_id_exist(images_path, commit_id):
+    with os.scandir(images_path) as images_content:
+        for item in images_content:
+            if item.is_dir() and commit_id == item.name:
+                return True
+        return False
+
+
+def checkout(commit_id):
+    commit_id = commit_id[0]
+    print('checkout {}'.format(commit_id))
+    # Check whether current working directory is under wit repo
+    wit_root_path = find_repo(os.getcwd(), True)
+    if wit_root_path is None:
+        logging.error(
+            'Not a wit repository (or any of the parent directories): {}'.format('.wit'))
+        return
+    images_path = os.path.join(wit_root_path, 'images')
+    staging_path = os.path.join(wit_root_path, 'staging_area')
+    # Check if commit ID exist
+    if commit_id == 'master':
+        ref_path = os.path.join(wit_root_path, 'references.txt')
+        if os.path.exists(ref_path):
+            commit_id = parse_reference_file(ref_path).get('master')
+            print('==> checkout {}'.format(commit_id))
+        else:
+            logging.error('Commit ID was not found: {}'.format(commit_id))
+            return
+    if not is_commit_id_exist(images_path, commit_id):
+        logging.error('Commit ID was not found: {}'.format(commit_id))
+        return
+    # Check if uncommitted files and unstaged files exist
+    last_commit_id = get_current_commit_id(images_path)
+    last_commit_id_folder = os.path.join(images_path, last_commit_id)
+    if get_changes_to_be_committed(staging_path, last_commit_id_folder, False) or get_changes_not_committed(Path(wit_root_path).parent, staging_path, False):
+        logging.error('Uncommitted work found, blocking checkout')
+        return
+    # Copy and override image's files, one by one, to their original location
+    source_commit_id_path = os.path.join(images_path, commit_id)
+    working_dir_target = Path(wit_root_path).parent
+    merge_override_tree(source_commit_id_path, working_dir_target)
+    merge_override_tree(source_commit_id_path, staging_path)
+    ref_path = os.path.join(wit_root_path, 'references.txt')
+    if os.path.exists(ref_path):
+        master = parse_reference_file(ref_path).get('master')
+        if commit_id != master:
+            create_reference_file(wit_root_path, commit_id, master)
+        else:
+            create_reference_file(wit_root_path, commit_id, commit_id)
+
+
 def parse_input(argv):
     # create the top-level parser
     parser = argparse.ArgumentParser(
@@ -367,6 +451,16 @@ def parse_input(argv):
                            help="File or folder to remove from staging.")
     parser_rm.set_defaults(func=rm)
 
+    # create the parser for the "checkout" command
+    parser_checkout = subparsers.add_parser(
+        Commends.CHECKOUT, help="Move to a different image.")
+    parser_checkout.add_argument("commit_id",
+                                 metavar="Commit ID",
+                                 nargs="+",
+                                 type=str,
+                                 help="Commit ID which mark the image restoration point.")
+    parser_checkout.set_defaults(func=checkout)
+
     if len(argv) == 0:
         parser.print_help()
         return
@@ -381,6 +475,8 @@ def parse_input(argv):
         status()
     elif args.command == Commends.RM:
         rm(args.path)
+    elif args.command == Commends.CHECKOUT:
+        checkout(args.commit_id)
 
 
 def configure_logging():

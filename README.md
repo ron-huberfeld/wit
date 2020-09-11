@@ -18,7 +18,7 @@ Python course exercise to code git like functionality
 [x] 'add' command - functionality to add files or folders to staging area </br>
 [x] 'commit' command - functionality to create snapshot from staging area to images area </br>
 [x] 'status' command - implement functionality to see files/folders status </br>
-[ ] 'checkout' command - get snapshot from images back into working folder and staging area </br>
+[x] 'checkout' command - get snapshot from images back into working folder and staging area </br>
 [ ] 'graph' command - </br>
 [ ] 'branch' command - </br>
 [ ] 'merge' command - </br>
