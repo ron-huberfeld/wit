@@ -1,21 +1,29 @@
+# Upload 172
 import argparse
+from datetime import datetime
 from distutils.dir_util import copy_tree
 from functools import partial
 import logging
 import os
 from pathlib import Path
+import random
 import shutil
+import string
 import sys
 from typing import List
+
+from dateutil.tz import tzlocal
 
 
 class Commends:
     INIT = 'init'
     ADD = 'add'
+    COMMIT = 'commit'
 
     def __init__(self) -> None:
         self.INIT
         self.ADD
+        self.COMMIT
 
 
 def make_folders(root_dir, subfolders):
@@ -93,6 +101,71 @@ def add(paths: List[str]):
         handle_path_addition(wit_root_path, path_item)
 
 
+def generate_id():
+    return ''.join(random.choices('abcdef' + string.digits, k=40))
+
+
+def get_current_time():
+    return datetime.now(tzlocal()).strftime("%a %b %d %H:%M:%S %Y %z")
+
+
+def parse_ref(ref_path):
+    return dict(line.rstrip().split('=') for line in open(ref_path) if not line.startswith("#"))
+
+
+def get_previous_commit(images_path):
+    ref_path = os.path.join(Path(images_path).parent, 'references.txt')
+    if os.path.exists(ref_path):
+        return parse_ref(ref_path).get('HEAD')
+    return None
+
+
+def create_commit_id_file(root, commit_id, message):
+    commit_file = os.path.join(root, commit_id + '.txt')
+    with open(commit_file, 'a') as fh:
+        parent = get_previous_commit(root)
+        current_time = get_current_time()
+        data = "parent={}\ndate={}\nmessage={}\n".format(
+            parent, current_time, message)
+        fh.write(data)
+
+
+def create_commit_id_folder(root, commit_id):
+    commit_path = os.path.join(root, commit_id)
+    os.mkdir(commit_path)
+    return commit_path
+
+
+def create_reference_file(wit_root_path, commit_id):
+    ref_path = os.path.join(wit_root_path, 'references.txt')
+    with open(ref_path, 'w') as fh:
+        data = "HEAD={}\nmaster={}\n".format(commit_id, commit_id)
+        fh.write(data)
+
+
+def commit(message):
+    # Check whether current working directory is under wit repo
+    wit_root_path = find_repo(os.getcwd(), True)
+    if wit_root_path is None:
+        logging.error(
+            'Not a wit repository (or any of the parent directories): {}'.format('.wit'))
+        return
+    # if not add.has_been_called:
+    #     logging.error('No changes in repo')
+    #     return
+    images_path = os.path.join(wit_root_path, 'images')
+    staging_path = os.path.join(wit_root_path, 'staging_area')
+    # Part I - generate ID and create folder
+    commit_id = generate_id()
+    commit_path = create_commit_id_folder(images_path, commit_id)
+    # Part II - Create metadata file
+    create_commit_id_file(images_path, commit_id, message[0])
+    # Part III - save staging content
+    copy_tree(staging_path, commit_path)
+    # Part IV - manage reference data
+    create_reference_file(wit_root_path, commit_id)
+
+
 def parse_input(argv):
     # create the top-level parser
     parser = argparse.ArgumentParser(
@@ -120,6 +193,17 @@ def parse_input(argv):
                             default=".",
                             help="file or folder to add to repo.")
     parser_add.set_defaults(func=add)
+
+    # create the parser for the "commit" command
+    parser_commit = subparsers.add_parser(
+        Commends.COMMIT, help="Create image restoration point.")
+    parser_commit.add_argument("message",
+                               metavar="Message",
+                               nargs="+",
+                               type=str,
+                               help="Commit text message assigned to image.")
+    parser_commit.set_defaults(func=commit)
+
     if len(argv) == 0:
         parser.print_help()
         return
@@ -128,6 +212,8 @@ def parse_input(argv):
         init(args.path)
     elif args.command == Commends.ADD:
         add(args.path)
+    elif args.command == Commends.COMMIT:
+        commit(args.message)
 
 
 def configure_logging():

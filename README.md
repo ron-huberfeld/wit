@@ -16,7 +16,7 @@ Python course exercise to code git like functionality
     [x] create 'images' and 'staging_area' folder inside .wit </br>
 </blockquote>
 [x] 'add' command - functionality to add files or folders to staging area </br>
-[ ] 'commit' command - functionality to create snapshot from staging area to images area </br>
+[x] 'commit' command - functionality to create snapshot from staging area to images area </br>
 [ ] 'status' command - implement functionality to see files/folders status </br>
 [ ] 'checkout' command - get snapshot from images back into working folder and staging area </br>
 [ ] 'graph' command - </br>
