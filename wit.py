@@ -14,6 +14,7 @@ import sys
 from typing import List
 
 from dateutil.tz import tzlocal
+from graphviz import Digraph
 from termcolor import colored
 
 
@@ -24,6 +25,7 @@ class Commends:
     STATUS = 'status'
     RM = 'rm'
     CHECKOUT = 'checkout'
+    GRAPH = 'graph'
 
     def __init__(self) -> None:
         self.INIT
@@ -32,6 +34,7 @@ class Commends:
         self.STATUS
         self.RM
         self.CHECKOUT
+        self.GRAPH
 
 
 def detect_changes(f):
@@ -115,6 +118,8 @@ def handle_path_addition(wit_root_path, path_item):
     staging_path = os.path.join(wit_root, 'staging_area')
     if os.path.isfile(path):
         relative_path = get_relative_path(wit_root, path, True)
+        Path(os.path.join(staging_path, relative_path)).mkdir(
+            exist_ok=True, parents=True)
         shutil.copy2(path_item, os.path.join(staging_path, relative_path))
     else:
         relative_path = get_relative_path(wit_root, path, False)
@@ -144,8 +149,8 @@ def get_current_time():
     return datetime.now(tzlocal()).strftime("%a %b %d %H:%M:%S %Y %z")
 
 
-def parse_reference_file(ref_path):
-    return dict(line.rstrip().split('=') for line in open(ref_path) if not line.startswith("#"))
+def parse_reference_file(file_path):
+    return dict(line.rstrip().split('=') for line in open(file_path) if not line.startswith("#"))
 
 
 def get_current_commit_id(images_path):
@@ -400,6 +405,60 @@ def checkout(commit_id):
             create_reference_file(wit_root_path, commit_id, commit_id)
 
 
+def traverse_history(images_path, commit):
+    history = {}
+    while commit != 'None':
+        commit_file = os.path.join(images_path, commit + '.txt')
+        parent_commit_id = parse_reference_file(commit_file).get('parent')
+        if parent_commit_id != 'None':
+            history[commit] = parent_commit_id
+        commit = parent_commit_id
+    return history
+
+
+def build_commit_history(wit_root_path, show_all):
+    images_path = os.path.join(wit_root_path, 'images')
+    head_commit_id = get_current_commit_id(images_path)
+    history = {}
+    if head_commit_id is None:
+        return history
+    history['Head'] = head_commit_id
+    ref_path = os.path.join(wit_root_path, 'references.txt')
+    if os.path.exists(ref_path):
+        master_commit_id = parse_reference_file(ref_path).get('master')
+        if master_commit_id == head_commit_id:
+            history['master'] = master_commit_id
+        elif show_all:
+            history['master'] = master_commit_id
+            history.update(traverse_history(images_path, master_commit_id))
+    history.update(traverse_history(images_path, head_commit_id))
+    return history
+
+
+def generate_graph(commits_history):
+    graph = Digraph(name='wit_graph')
+    for k, v in commits_history.items():
+        graph.edge(k, v)
+        if k == 'master':
+            graph.node('master', shape="plaintext")
+    graph.graph_attr['rankdir'] = 'LR'
+    graph.edge_attr.update(arrowhead='vee', arrowsize='2')
+    graph.node('Head', shape="plaintext")
+    print(graph.source)
+    graph.view()
+
+
+def graph(show_all):
+    # Check whether current working directory is under wit repo
+    wit_root_path = find_repo(os.getcwd(), True)
+    if wit_root_path is None:
+        logging.error(
+            'Not a wit repository (or any of the parent directories): {}'.format('.wit'))
+        return
+    commits_history = build_commit_history(wit_root_path, show_all)
+    generate_graph(commits_history)
+
+
 def parse_input(argv):
     # create the top-level parser
     parser = argparse.ArgumentParser(
@@ -461,6 +520,17 @@ def parse_input(argv):
                                  help="Commit ID which mark the image restoration point.")
     parser_checkout.set_defaults(func=checkout)
 
+    # create the parser for the "graph" command
+    parser_graph = subparsers.add_parser(
+        Commends.GRAPH, help="Display wit commits graph.")
+    parser_graph.add_argument("--all",
+                              metavar="all commits",
+                              nargs="?",
+                              const=True,
+                              default=False,
+                              help="show all commits history.")
+    parser_graph.set_defaults(func=graph)
+
     if len(argv) == 0:
         parser.print_help()
         return
@@ -477,6 +547,8 @@ def parse_input(argv):
         rm(args.path)
     elif args.command == Commends.CHECKOUT:
         checkout(args.commit_id)
+    elif args.command == Commends.GRAPH:
+        graph(args.all)
 
 
 def configure_logging():
@@ -493,7 +565,15 @@ def configure_logging():
     logger.addHandler(console_handler)
 
 
+def check_dependencies():
+    # https://github.com/functicons/git-graph/blob/master/git-graph.py
+    if not shutil.which('dot'):
+        logging.error(
+            'Command "dot" was not found, visual graph will not be available.')
+
+
 def main(argv=sys.argv[1:]):
+    check_dependencies()
     configure_logging()
     parse_input(argv)
 

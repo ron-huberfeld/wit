@@ -19,6 +19,6 @@ Python course exercise to code git like functionality
 [x] 'commit' command - functionality to create snapshot from staging area to images area </br>
 [x] 'status' command - implement functionality to see files/folders status </br>
 [x] 'checkout' command - get snapshot from images back into working folder and staging area </br>
-[ ] 'graph' command - </br>
+[x] 'graph' command - implement graphical display of the tree structure in the repository. </br>
 [ ] 'branch' command - </br>
 [ ] 'merge' command - </br>
