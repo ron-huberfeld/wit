@@ -23,7 +23,7 @@ Python course exercise to code git like functionality
 [x] 'branch' command - implement branch creation to enable parallel work in wit. </br>
 [x] 'merge' command - implement merge of two branches into one.</br>
 
-TODO:
+### TODO
 [ ] enable merge parameter to be either commit id or branch name. </br>
-[ ] implement 'diff' command
-[ ] implement deep file compare and merge
+[ ] implement 'diff' command </br>
+[ ] implement deep file compare and merge </br>
