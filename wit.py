@@ -1,4 +1,5 @@
 import argparse
+from collections import defaultdict
 from datetime import datetime
 from distutils.dir_util import copy_tree
 from filecmp import dircmp
@@ -27,6 +28,7 @@ class Commends:
     CHECKOUT = 'checkout'
     GRAPH = 'graph'
     BRANCH = 'branch'
+    MERGE = 'merge'
 
     def __init__(self) -> None:
         self.INIT
@@ -37,6 +39,7 @@ class Commends:
         self.CHECKOUT
         self.GRAPH
         self.BRANCH
+        self.MERGE
 
 
 class WitException(Exception):
@@ -54,6 +57,7 @@ class WitRepo:
         self.wit_active_branch_file = os.path.join(
             self.wit_dir, 'activated.txt')
         self.branches = {}
+        self.commit_history = defaultdict(list)
 
     def __str__(self) -> str:
         return 'root path: {}\nwit dir: {}\nref file: {}'.format(self.wit_root_path, self.wit_dir, self.wit_references_file)
@@ -99,7 +103,7 @@ class WitRepo:
             fh.write(data)
 
     def update_references_file(self, commit_id, flow='commit'):
-        head = self.get_references_file_data().get('HEAD')
+        head = self.get_current_commit_id()
         master = self.get_references_file_data().get('master')
         self.branches = self.get_branches()
         active_branch = self.get_active_branch()
@@ -131,7 +135,7 @@ class WitRepo:
     def update_branches(self, branch_name):
         if not os.path.exists(self.wit_references_file):
             raise WitException('Cannot read reference file.')
-        head_commit_id = self.get_references_file_data().get('HEAD')
+        head_commit_id = self.get_current_commit_id()
         self.branches = self.get_branches()  # branches contain 'master'
         if branch_name in self.branches:
             raise WitException(
@@ -160,43 +164,46 @@ class WitRepo:
 
     def build_commit_history(self, show_all):
         head_commit_id = self.get_current_commit_id()
-        history = {}
         if head_commit_id is None:
-            return history
-        history['Head'] = head_commit_id
-        if os.path.exists(self.wit_references_file):
-            master_commit_id = self.get_references_file_data().get('master')
-            if master_commit_id == head_commit_id:
-                history['master'] = master_commit_id
-            elif show_all:
-                self.branches = self.get_branches()
-                for branch, branch_commit_id in self.branches.items():
-                    history[branch] = branch_commit_id
-                history['master'] = master_commit_id
-                history.update(self.traverse_history(
-                    self.wit_images_dir, master_commit_id))
-        history.update(self.traverse_history(
-            self.wit_images_dir, head_commit_id))
-        return history
+            return self.commit_history
+        self.commit_history['Head'].append(head_commit_id)
+        self.traverse_history(head_commit_id)
+        self.branches = self.get_branches()
+        for branch, branch_commit_id in self.branches.items():
+            if show_all:
+                self.commit_history[branch].append(branch_commit_id)
+                self.traverse_history(branch_commit_id)
+            elif branch == 'master' and head_commit_id == branch_commit_id:
+                self.commit_history[branch].append(branch_commit_id)
+                self.traverse_history(branch_commit_id)
+        return self.commit_history
 
     def get_commit_file_data(self, filename):
         return dict(line.rstrip().split('=') for line in open(filename) if not line.startswith("#"))
 
-    def traverse_history(self, images_path, commit):
-        history = {}
-        while commit != 'None':
-            commit_file = os.path.join(images_path, commit + '.txt')
-            parent_commit_id = self.get_commit_file_data(
-                commit_file).get('parent')
-            if parent_commit_id != 'None':
-                history[commit] = parent_commit_id
-            commit = parent_commit_id
-        return history
+    def traverse_history(self, commit, visited=None):
+        if visited is None:
+            visited = set()
+        if commit in visited:
+            return
+        visited.add(commit)
+        if commit != 'None':
+            commit_file = os.path.join(self.wit_images_dir, commit + '.txt')
+            parents = self.get_commit_file_data(commit_file).get('parent')
+            parents_ids = parents.split(',')
+            for p_id in parents_ids:
+                if p_id != 'None':
+                    self.commit_history[commit].append(p_id)
+                self.traverse_history(p_id, visited)
+        return self.commit_history
 
-    def create_commit_id_file(self, commit_id, message):
+    def create_commit_id_file(self, commit_id, message, branch):
         commit_file = os.path.join(self.wit_images_dir, commit_id + '.txt')
         with open(commit_file, 'a') as fh:
-            parent = self.get_current_commit_id()
+            if branch is None:
+                parent = self.get_current_commit_id()
+            else:
+                parent = '{},{}'.format(self.get_current_commit_id(), branch)
             current_time = get_current_time()
             data = "parent={}\ndate={}\nmessage={}\n".format(
                 parent, current_time, message)
@@ -234,6 +241,67 @@ class WitRepo:
                 'Commit ID was not found: {}'.format(actual_commit_id))
         return actual_commit_id
 
+    def generate_graph(self):
+        self.branches = self.get_branches()
+        active_branch = self.get_active_branch()
+        data = self.commit_history
+        graph = Digraph(name='wit_graph')
+        for k, v in data.items():
+            for item in v:
+                graph.edge(k, item)
+                if k in self.branches:
+                    graph.node(k, shape="plaintext")
+                    if k == active_branch:
+                        graph.node(k, label="{}*".format(k))
+        graph.graph_attr['rankdir'] = 'LR'
+        graph.edge_attr.update(arrowhead='vee', arrowsize='2')
+        graph.node('Head', shape="plaintext")
+        print(graph.source)
+        graph.view()
+
+    def before_merge(self, branch_name, head_commit_id):
+        # if branch and head are same -> nothing to do
+        self.branches = self.get_branches()
+        if branch_name not in self.branches:
+            raise WitException('Branch "{}" not found.'.format(branch_name))
+        branch_commit_id = self.branches.get(branch_name)
+        if head_commit_id == branch_commit_id:
+            raise WitException(
+                '"HEAD" and branch "{}" are the same -> do nothing.'.format(branch_name))
+        return branch_commit_id
+
+    def get_history_set_for_commit(self, commit_id):
+        history = set()
+        history.add(commit_id)
+        self.commit_history = defaultdict(list)
+        history_dict = self.traverse_history(commit_id)
+        for k, v in history_dict.items():
+            history.add(k)
+            for item in v:
+                history.add(item)
+        return history
+
+    def handle_merge_branch(self, branch_name):
+        head_commit_id = self.get_current_commit_id()
+        branch_commit_id = self.before_merge(branch_name, head_commit_id)
+        # find 'common commit' for head & branch
+        branch_history_set = self.get_history_set_for_commit(branch_commit_id)
+        head_history_set = self.get_history_set_for_commit(head_commit_id)
+        # TODO - could be more than 1?
+        common_commit_id = head_history_set.intersection(branch_history_set)
+        print(common_commit_id)
+        print(branch_history_set)
+        print(head_history_set)
+        # find changes from 'common commit' until branch
+        changes_set = branch_history_set.difference(common_commit_id)
+        print(changes_set)
+        # update staging area with the changes
+        for item in changes_set:
+            source_commit_id_path = os.path.join(self.wit_images_dir, item)
+            merge_override_tree(source_commit_id_path, self.wit_staging_dir)
+        # execute commit with the changes in staging
+        commit(['merge "{}"'.format(branch_name)], branch_commit_id)
+
 
 def detect_changes(f):
     def are_changes_exist():
@@ -242,13 +310,12 @@ def detect_changes(f):
             wit.validate_repo_at_path(os.getcwd(), True)
         except WitException:
             return
-        images_path = wit.wit_images_dir
-        staging_path = wit.wit_staging_dir
         last_commit_id = wit.get_current_commit_id()
         if last_commit_id is None:
             return True
-        last_commit_id_folder = os.path.join(images_path, last_commit_id)
-        if get_changes_to_be_committed(staging_path, last_commit_id_folder, False):
+        last_commit_id_folder = os.path.join(
+            wit.wit_images_dir, last_commit_id)
+        if get_changes_to_be_committed(wit.wit_staging_dir, last_commit_id_folder, False):
             return True
         return False
 
@@ -274,13 +341,9 @@ def make_folders(root_dir, subfolders):
 
 def init(args):
     ''' Initialize wit work folders.
-
     Args: None
-
     Raises: OSError in case folder creation is failing.
-
     Return: None
-
     Assumption - if folders exists don't do anything.
     '''
     wit = WitRepo(os.getcwd())
@@ -335,9 +398,8 @@ def get_current_time():
 
 
 @detect_changes
-def commit(message):
+def commit(message, branch=None):
     message = message[0]
-    # Check whether current working directory is under wit repo
     try:
         wit = WitRepo(os.getcwd())
         wit.validate_repo_at_path(os.getcwd(), True)
@@ -348,7 +410,7 @@ def commit(message):
     commit_id = generate_id()
     commit_path = wit.create_commit_id_folder(commit_id)
     # Part II - Create metadata file
-    wit.create_commit_id_file(commit_id, message)
+    wit.create_commit_id_file(commit_id, message, branch)
     # Part III - save staging content
     copy_tree(staging_path, commit_path)
     # Part IV - manage reference data
@@ -435,16 +497,15 @@ def status():
         wit_root_path = wit.validate_repo_at_path(os.getcwd(), True)
     except WitException:
         return
-    images_path = wit.wit_images_dir
-    staging_path = wit.wit_staging_dir
     last_commit_id = wit.get_current_commit_id()
     if last_commit_id is None:
         print('No commits yet\n\nChanges to be committed:\n{}\nChanges not staged for commit:\n{}\nUntracked files:\n{}\n'.format(
-            get_changes_to_be_committed(staging_path, None), get_changes_not_committed(Path(wit_root_path).parent, staging_path), get_untracked_files(Path(wit_root_path).parent, staging_path)))
+            get_changes_to_be_committed(wit.wit_staging_dir, None), get_changes_not_committed(Path(wit_root_path).parent, wit.wit_staging_dir), get_untracked_files(Path(wit_root_path).parent, wit.wit_staging_dir)))
     else:
-        last_commit_id_folder = os.path.join(images_path, last_commit_id)
+        last_commit_id_folder = os.path.join(
+            wit.wit_images_dir, last_commit_id)
         print('Current commit ID: {}\nChanges to be committed:\n{}\nChanges not staged for commit:\n{}\nUntracked files:\n{}\n'.format(
-            last_commit_id, get_changes_to_be_committed(staging_path, last_commit_id_folder), get_changes_not_committed(Path(wit_root_path).parent, staging_path), get_untracked_files(Path(wit_root_path).parent, staging_path)))
+            last_commit_id, get_changes_to_be_committed(wit.wit_staging_dir, last_commit_id_folder), get_changes_not_committed(Path(wit_root_path).parent, wit.wit_staging_dir), get_untracked_files(Path(wit_root_path).parent, wit.wit_staging_dir)))
 
 
 def handle_path_removal(wit_root_path, path_item):
@@ -479,7 +540,6 @@ def rm(paths):
 def merge_override_tree(sourceRoot, destRoot):
     # https://stackoverflow.com/questions/22588225/how-do-you-merge-two-directories-or-move-with-replace-from-the-windows-command
     ''' Updates destination and override existing files.
-
     Args:
         sourceRoot: source root folder of files to copy
         destRoot:   Destination root folder for files to be created
@@ -504,55 +564,33 @@ def checkout(commit_id):
     try:
         wit = WitRepo(os.getcwd())
         wit_root_path = wit.validate_repo_at_path(os.getcwd(), True)
-    except WitException:
-        return
-    images_path = wit.wit_images_dir
-    staging_path = wit.wit_staging_dir
-    try:
         commit_id = wit.get_actual_commit_id_from_input(commit_id)
     except WitException:
         return
     # Check if uncommitted files and unstaged files exist
     last_commit_id = wit.get_current_commit_id()
-    last_commit_id_folder = os.path.join(images_path, last_commit_id)
-    if get_changes_to_be_committed(staging_path, last_commit_id_folder, False) or get_changes_not_committed(Path(wit_root_path).parent, staging_path, False):
+    last_commit_id_folder = os.path.join(wit.wit_images_dir, last_commit_id)
+    if get_changes_to_be_committed(wit.wit_staging_dir, last_commit_id_folder, False) or get_changes_not_committed(Path(wit_root_path).parent, wit.wit_staging_dir, False):
         logging.error('Uncommitted work found, blocking checkout')
         return
     # Copy and override image's files, one by one, to their original location
-    source_commit_id_path = os.path.join(images_path, commit_id)
+    source_commit_id_path = os.path.join(wit.wit_images_dir, commit_id)
     working_dir_target = Path(wit_root_path).parent
     merge_override_tree(source_commit_id_path, working_dir_target)
-    merge_override_tree(source_commit_id_path, staging_path)
+    merge_override_tree(source_commit_id_path, wit.wit_staging_dir)
     ref_path = wit.wit_references_file
     if os.path.exists(ref_path):
         wit.update_references_file(commit_id, 'checkout')
-
-
-def generate_graph(commits_history, branches, active_branch):
-    graph = Digraph(name='wit_graph')
-    for k, v in commits_history.items():
-        graph.edge(k, v)
-        if k in branches:
-            graph.node(k, shape="plaintext")
-            if k == active_branch:
-                graph.node(k, label="{}*".format(k))
-    graph.graph_attr['rankdir'] = 'LR'
-    graph.edge_attr.update(arrowhead='vee', arrowsize='2')
-    graph.node('Head', shape="plaintext")
-    print(graph.source)
-    graph.view()
 
 
 def graph(show_all):
     wit = WitRepo(os.getcwd())
     try:
         wit.validate_repo_at_path(os.getcwd(), True)
+        wit.build_commit_history(show_all)
+        wit.generate_graph()
     except WitException:
         return
-    commits_history = wit.build_commit_history(show_all)
-    branches = wit.get_branches()
-    active_branch = wit.get_active_branch()
-    generate_graph(commits_history, branches, active_branch)
 
 
 def branch(name):
@@ -560,11 +598,17 @@ def branch(name):
     try:
         wit = WitRepo(os.getcwd())
         wit.validate_repo_at_path(os.getcwd(), True)
+        wit.update_branches(branch_name)
     except WitException:
         return
-    # add row to references.txt : name = commit_id from head
+
+
+def merge(name):
+    branch_name = name[0]
     try:
-        wit.update_branches(branch_name)
+        wit = WitRepo(os.getcwd())
+        wit.validate_repo_at_path(os.getcwd(), True)
+        wit.handle_merge_branch(branch_name)
     except WitException:
         return
 
@@ -650,6 +694,15 @@ def parse_input(argv):
                                help="branch name")
     parser_branch.set_defaults(func=branch)
 
+    # create the parser for the "merge" command
+    parser_merge = subparsers.add_parser(
+        Commends.MERGE, help="Create merge point between head and branch.")
+    parser_merge.add_argument("name",
+                              metavar="name",
+                              nargs="+",
+                              help="branch name")
+    parser_merge.set_defaults(func=merge)
+
     if len(argv) == 0:
         parser.print_help()
         return
@@ -670,6 +723,8 @@ def parse_input(argv):
         graph(args.all)
     elif args.command == Commends.BRANCH:
         branch(args.name)
+    elif args.command == Commends.MERGE:
+        merge(args.name)
 
 
 def configure_logging():
