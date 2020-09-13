@@ -20,5 +20,5 @@ Python course exercise to code git like functionality
 [x] 'status' command - implement functionality to see files/folders status </br>
 [x] 'checkout' command - get snapshot from images back into working folder and staging area </br>
 [x] 'graph' command - implement graphical display of the tree structure in the repository. </br>
-[ ] 'branch' command - </br>
-[ ] 'merge' command - </br>
+[x] 'branch' command - implement branch creation to enable parallel work in wit. </br>
+[ ] 'merge' command - implement merge of two branches into one.</br>

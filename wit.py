@@ -26,6 +26,7 @@ class Commends:
     RM = 'rm'
     CHECKOUT = 'checkout'
     GRAPH = 'graph'
+    BRANCH = 'branch'
 
     def __init__(self) -> None:
         self.INIT
@@ -35,18 +36,215 @@ class Commends:
         self.RM
         self.CHECKOUT
         self.GRAPH
+        self.BRANCH
+
+
+class WitException(Exception):
+    def __init__(self, message):
+        logging.error(message)
+
+
+class WitRepo:
+    def __init__(self, wit_root_path) -> None:
+        self.wit_root_path = wit_root_path
+        self.wit_dir = os.path.join(self.wit_root_path, '.wit')
+        self.wit_images_dir = os.path.join(self.wit_dir, 'images')
+        self.wit_staging_dir = os.path.join(self.wit_dir, 'staging_area')
+        self.wit_references_file = os.path.join(self.wit_dir, 'references.txt')
+        self.wit_active_branch_file = os.path.join(
+            self.wit_dir, 'activated.txt')
+        self.branches = {}
+
+    def __str__(self) -> str:
+        return 'root path: {}\nwit dir: {}\nref file: {}'.format(self.wit_root_path, self.wit_dir, self.wit_references_file)
+
+    def update_wit_dir(self, new_root):
+        self.wit_root_path = new_root
+        self.wit_dir = os.path.join(self.wit_root_path, '.wit')
+        self.wit_images_dir = os.path.join(self.wit_dir, 'images')
+        self.wit_staging_dir = os.path.join(self.wit_dir, 'staging_area')
+        self.wit_references_file = os.path.join(self.wit_dir, 'references.txt')
+        self.wit_active_branch_file = os.path.join(
+            self.wit_dir, 'activated.txt')
+
+    def validate_repo_at_path(self, path, is_path_required):
+        self.wit_dir = self.find_repo(path, is_path_required)
+        if self.wit_dir is None:
+            raise WitException(
+                'Not a wit repository (or any of the parent directories): {}'.format('.wit'))
+        self.update_wit_dir(Path(self.wit_dir).parent)
+        return self.wit_dir
+
+    def find_repo(self, path='.', required=False):
+        path = os.path.realpath(path)
+        if os.path.isdir(os.path.join(path, '.wit')):
+            if required:
+                return os.path.join(path, '.wit')
+            return True
+        parent = os.path.realpath(os.path.join(path, ".."))
+        if parent == path:
+            if required:
+                return None
+            return False
+        return self.find_repo(parent, required)
+
+    def get_references_file_data(self):
+        return dict(line.rstrip().split('=') for line in open(self.wit_references_file) if not line.startswith("#"))
+
+    def create_references_file(self, head, master, branches):
+        with open(self.wit_references_file, 'w') as fh:
+            data = "HEAD={}\nmaster={}\n".format(head, master)
+            for branch_name, commit_id in branches.items():
+                data = data + '{}={}\n'.format(branch_name, commit_id)
+            fh.write(data)
+
+    def update_references_file(self, commit_id, flow='commit'):
+        head = self.get_references_file_data().get('HEAD')
+        master = self.get_references_file_data().get('master')
+        self.branches = self.get_branches()
+        active_branch = self.get_active_branch()
+        active_branch_commit_id = self.branches.get(active_branch)
+        if head == active_branch_commit_id:
+            # will update 'master' if active branch is 'master'
+            self.branches[active_branch] = commit_id
+        self.branches.pop('master')
+        if flow == 'commit':
+            if head == master and master == active_branch_commit_id:
+                self.create_references_file(
+                    commit_id, commit_id, self.branches)
+            else:
+                self.create_references_file(commit_id, master, self.branches)
+        elif flow == 'checkout':
+            if commit_id != master:
+                self.create_references_file(commit_id, master, self.branches)
+            else:
+                self.create_references_file(
+                    commit_id, commit_id, self.branches)
+
+    def get_branches(self):
+        if not os.path.exists(self.wit_references_file):
+            raise WitException('Cannot read reference file.')
+        self.branches = self.get_references_file_data()
+        self.branches.pop("HEAD")
+        return self.branches
+
+    def update_branches(self, branch_name):
+        if not os.path.exists(self.wit_references_file):
+            raise WitException('Cannot read reference file.')
+        head_commit_id = self.get_references_file_data().get('HEAD')
+        self.branches = self.get_branches()  # branches contain 'master'
+        if branch_name in self.branches:
+            raise WitException(
+                'Branch name "{}" already exists.'.format(branch_name))
+        new_branch = {}
+        new_branch[branch_name] = head_commit_id
+        self.branches.update(new_branch)
+        # split 'master' from branches before create file
+        master = self.branches.pop('master')
+        self.create_references_file(head_commit_id, master, self.branches)
+
+    def create_active_branch_file(self, branch_name="master"):
+        with open(self.wit_active_branch_file, 'w') as fh:
+            fh.write(branch_name)
+
+    def get_active_branch(self):
+        with open(self.wit_active_branch_file, 'r') as fh:
+            active_branch = fh.readline()
+            return active_branch
+
+    def get_current_commit_id(self):
+        if os.path.exists(self.wit_references_file):
+            return self.get_references_file_data().get('HEAD')
+        logging.debug('No reference file exist')
+        return None
+
+    def build_commit_history(self, show_all):
+        head_commit_id = self.get_current_commit_id()
+        history = {}
+        if head_commit_id is None:
+            return history
+        history['Head'] = head_commit_id
+        if os.path.exists(self.wit_references_file):
+            master_commit_id = self.get_references_file_data().get('master')
+            if master_commit_id == head_commit_id:
+                history['master'] = master_commit_id
+            elif show_all:
+                self.branches = self.get_branches()
+                for branch, branch_commit_id in self.branches.items():
+                    history[branch] = branch_commit_id
+                history['master'] = master_commit_id
+                history.update(self.traverse_history(
+                    self.wit_images_dir, master_commit_id))
+        history.update(self.traverse_history(
+            self.wit_images_dir, head_commit_id))
+        return history
+
+    def get_commit_file_data(self, filename):
+        return dict(line.rstrip().split('=') for line in open(filename) if not line.startswith("#"))
+
+    def traverse_history(self, images_path, commit):
+        history = {}
+        while commit != 'None':
+            commit_file = os.path.join(images_path, commit + '.txt')
+            parent_commit_id = self.get_commit_file_data(
+                commit_file).get('parent')
+            if parent_commit_id != 'None':
+                history[commit] = parent_commit_id
+            commit = parent_commit_id
+        return history
+
+    def create_commit_id_file(self, commit_id, message):
+        commit_file = os.path.join(self.wit_images_dir, commit_id + '.txt')
+        with open(commit_file, 'a') as fh:
+            parent = self.get_current_commit_id()
+            current_time = get_current_time()
+            data = "parent={}\ndate={}\nmessage={}\n".format(
+                parent, current_time, message)
+            fh.write(data)
+
+    def create_commit_id_folder(self, commit_id):
+        commit_path = os.path.join(self.wit_images_dir, commit_id)
+        os.mkdir(commit_path)
+        return commit_path
+
+    def is_commit_id_exist(self, commit_id):
+        with os.scandir(self.wit_images_dir) as images_content:
+            for item in images_content:
+                if item.is_dir() and commit_id == item.name:
+                    return True
+            return False
+
+    def get_actual_commit_id_from_input(self, checkout_input):
+        ''' Parsing checkout input to actual commit_id
+        Args: checkout_input - could be either branch name (including 'master' branch) or commit id
+        Raises: WitException if references files does not exist or if commit id folder was not found
+        Return: valid commit id
+        '''
+        if checkout_input in self.get_branches():
+            if not os.path.exists(self.wit_references_file):
+                raise WitException('Cannot read reference file.')
+            actual_commit_id = self.get_references_file_data().get(checkout_input)
+            self.create_active_branch_file(checkout_input)
+        else:
+            actual_commit_id = checkout_input
+            self.create_active_branch_file("")
+        logging.warning('==> checkout {}'.format(actual_commit_id))
+        if not self.is_commit_id_exist(actual_commit_id):
+            raise WitException(
+                'Commit ID was not found: {}'.format(actual_commit_id))
+        return actual_commit_id
 
 
 def detect_changes(f):
     def are_changes_exist():
-        wit_root_path = find_repo(os.getcwd(), True)
-        if wit_root_path is None:
-            logging.error(
-                'Not a wit repository (or any of the parent directories): {}'.format('.wit'))
+        try:
+            wit = WitRepo(os.getcwd())
+            wit.validate_repo_at_path(os.getcwd(), True)
+        except WitException:
             return
-        images_path = os.path.join(wit_root_path, 'images')
-        staging_path = os.path.join(wit_root_path, 'staging_area')
-        last_commit_id = get_current_commit_id(images_path)
+        images_path = wit.wit_images_dir
+        staging_path = wit.wit_staging_dir
+        last_commit_id = wit.get_current_commit_id()
         if last_commit_id is None:
             return True
         last_commit_id_folder = os.path.join(images_path, last_commit_id)
@@ -58,7 +256,7 @@ def detect_changes(f):
     def decorated(*args, **kwargs):
         changes_exist = are_changes_exist()
         if not changes_exist:
-            print('No changes detected in staging to be committed.')
+            logging.error('No changes detected in staging to be committed.')
             return
         return f(*args, **kwargs)
     return decorated
@@ -85,24 +283,11 @@ def init(args):
 
     Assumption - if folders exists don't do anything.
     '''
-    WORKDIR = os.getcwd()
-    wit_root_path = os.path.join(WORKDIR, '.wit')
+    wit = WitRepo(os.getcwd())
+    wit_dir = wit.wit_dir
     subfolders = ('images', 'staging_area')
-    make_folders(wit_root_path, subfolders)
-
-
-def find_repo(path='.', required=False):
-    path = os.path.realpath(path)
-    if os.path.isdir(os.path.join(path, '.wit')):
-        if required:
-            return os.path.join(path, '.wit')
-        return True
-    parent = os.path.realpath(os.path.join(path, ".."))
-    if parent == path:
-        if required:
-            return None
-        return False
-    return find_repo(parent, required)
+    make_folders(wit_dir, subfolders)
+    wit.create_active_branch_file()
 
 
 def get_relative_path(wit_root: Path, target: Path, is_file: bool) -> Path:
@@ -115,7 +300,7 @@ def handle_path_addition(wit_root_path, path_item):
     realpath = os.path.realpath(path_item)
     path = Path(realpath)
     wit_root = Path(wit_root_path)
-    staging_path = os.path.join(wit_root, 'staging_area')
+    staging_path = os.path.join(wit_root_path, 'staging_area')
     if os.path.isfile(path):
         relative_path = get_relative_path(wit_root, path, True)
         Path(os.path.join(staging_path, relative_path)).mkdir(
@@ -133,10 +318,10 @@ def add(paths: List[str]):
             logging.error(
                 'Path "{}" did not match any files'.format(path_item))
             return
-        wit_root_path = find_repo(path_item, True)
-        if wit_root_path is None:
-            logging.error(
-                'Not a wit repository (or any of the parent directories): {}'.format('.wit'))
+        try:
+            wit_root_path = WitRepo(
+                os.getcwd()).validate_repo_at_path(path_item, True)
+        except WitException:
             return
         handle_path_addition(wit_root_path, path_item)
 
@@ -149,69 +334,29 @@ def get_current_time():
     return datetime.now(tzlocal()).strftime("%a %b %d %H:%M:%S %Y %z")
 
 
-def parse_reference_file(file_path):
-    return dict(line.rstrip().split('=') for line in open(file_path) if not line.startswith("#"))
-
-
-def get_current_commit_id(images_path):
-    ref_path = os.path.join(Path(images_path).parent, 'references.txt')
-    if os.path.exists(ref_path):
-        return parse_reference_file(ref_path).get('HEAD')
-    logging.info('No reference file exist')
-    return None
-
-
-def create_commit_id_file(images_path, commit_id, message):
-    commit_file = os.path.join(images_path, commit_id + '.txt')
-    with open(commit_file, 'a') as fh:
-        parent = get_current_commit_id(images_path)
-        current_time = get_current_time()
-        data = "parent={}\ndate={}\nmessage={}\n".format(
-            parent, current_time, message)
-        fh.write(data)
-
-
-def create_commit_id_folder(images_path, commit_id):
-    commit_path = os.path.join(images_path, commit_id)
-    os.mkdir(commit_path)
-    return commit_path
-
-
-def create_reference_file(wit_root_path, head, master):
-    ref_path = os.path.join(wit_root_path, 'references.txt')
-    with open(ref_path, 'w') as fh:
-        data = "HEAD={}\nmaster={}\n".format(head, master)
-        fh.write(data)
-
-
 @detect_changes
 def commit(message):
+    message = message[0]
     # Check whether current working directory is under wit repo
-    wit_root_path = find_repo(os.getcwd(), True)
-    if wit_root_path is None:
-        logging.error(
-            'Not a wit repository (or any of the parent directories): {}'.format('.wit'))
+    try:
+        wit = WitRepo(os.getcwd())
+        wit.validate_repo_at_path(os.getcwd(), True)
+    except WitException:
         return
-    images_path = os.path.join(wit_root_path, 'images')
-    staging_path = os.path.join(wit_root_path, 'staging_area')
+    staging_path = wit.wit_staging_dir
     # Part I - generate ID and create folder
     commit_id = generate_id()
-    commit_path = create_commit_id_folder(images_path, commit_id)
+    commit_path = wit.create_commit_id_folder(commit_id)
     # Part II - Create metadata file
-    create_commit_id_file(images_path, commit_id, message[0])
+    wit.create_commit_id_file(commit_id, message)
     # Part III - save staging content
     copy_tree(staging_path, commit_path)
     # Part IV - manage reference data
-    ref_path = os.path.join(wit_root_path, 'references.txt')
+    ref_path = wit.wit_references_file
     if os.path.exists(ref_path):
-        head = parse_reference_file(ref_path).get('HEAD')
-        master = parse_reference_file(ref_path).get('master')
-        if head == master:
-            create_reference_file(wit_root_path, commit_id, commit_id)
-        else:
-            create_reference_file(wit_root_path, commit_id, master)
+        wit.update_references_file(commit_id)
     else:
-        create_reference_file(wit_root_path, commit_id, commit_id)
+        wit.create_references_file(commit_id, commit_id, wit.branches)
 
 
 def get_modified_files(dcmp):
@@ -285,15 +430,14 @@ def get_untracked_files(workdir, stage_area):
 
 
 def status():
-    # Check whether current working directory is under wit repo
-    wit_root_path = find_repo(os.getcwd(), True)
-    if wit_root_path is None:
-        logging.error(
-            'Not a wit repository (or any of the parent directories): {}'.format('.wit'))
+    try:
+        wit = WitRepo(os.getcwd())
+        wit_root_path = wit.validate_repo_at_path(os.getcwd(), True)
+    except WitException:
         return
-    images_path = os.path.join(wit_root_path, 'images')
-    staging_path = os.path.join(wit_root_path, 'staging_area')
-    last_commit_id = get_current_commit_id(images_path)
+    images_path = wit.wit_images_dir
+    staging_path = wit.wit_staging_dir
+    last_commit_id = wit.get_current_commit_id()
     if last_commit_id is None:
         print('No commits yet\n\nChanges to be committed:\n{}\nChanges not staged for commit:\n{}\nUntracked files:\n{}\n'.format(
             get_changes_to_be_committed(staging_path, None), get_changes_not_committed(Path(wit_root_path).parent, staging_path), get_untracked_files(Path(wit_root_path).parent, staging_path)))
@@ -324,10 +468,10 @@ def rm(paths):
             logging.error(
                 'Path "{}" did not match any files'.format(path_item))
             return
-        wit_root_path = find_repo(path_item, True)
-        if wit_root_path is None:
-            logging.error(
-                'Not a wit repository (or any of the parent directories): {}'.format('.wit'))
+        try:
+            wit_root_path = WitRepo(
+                os.getcwd()).validate_repo_at_path(path_item, True)
+        except WitException:
             return
         handle_path_removal(wit_root_path, path_item)
 
@@ -354,39 +498,22 @@ def merge_override_tree(sourceRoot, destRoot):
             shutil.copy(srcFile, destFile)
 
 
-def is_commit_id_exist(images_path, commit_id):
-    with os.scandir(images_path) as images_content:
-        for item in images_content:
-            if item.is_dir() and commit_id == item.name:
-                return True
-        return False
-
-
 def checkout(commit_id):
     commit_id = commit_id[0]
     print('checkout {}'.format(commit_id))
-    # Check whether current working directory is under wit repo
-    wit_root_path = find_repo(os.getcwd(), True)
-    if wit_root_path is None:
-        logging.error(
-            'Not a wit repository (or any of the parent directories): {}'.format('.wit'))
+    try:
+        wit = WitRepo(os.getcwd())
+        wit_root_path = wit.validate_repo_at_path(os.getcwd(), True)
+    except WitException:
         return
-    images_path = os.path.join(wit_root_path, 'images')
-    staging_path = os.path.join(wit_root_path, 'staging_area')
-    # Check if commit ID exist
-    if commit_id == 'master':
-        ref_path = os.path.join(wit_root_path, 'references.txt')
-        if os.path.exists(ref_path):
-            commit_id = parse_reference_file(ref_path).get('master')
-            print('==> checkout {}'.format(commit_id))
-        else:
-            logging.error('Commit ID was not found: {}'.format(commit_id))
-            return
-    if not is_commit_id_exist(images_path, commit_id):
-        logging.error('Commit ID was not found: {}'.format(commit_id))
+    images_path = wit.wit_images_dir
+    staging_path = wit.wit_staging_dir
+    try:
+        commit_id = wit.get_actual_commit_id_from_input(commit_id)
+    except WitException:
         return
     # Check if uncommitted files and unstaged files exist
-    last_commit_id = get_current_commit_id(images_path)
+    last_commit_id = wit.get_current_commit_id()
     last_commit_id_folder = os.path.join(images_path, last_commit_id)
     if get_changes_to_be_committed(staging_path, last_commit_id_folder, False) or get_changes_not_committed(Path(wit_root_path).parent, staging_path, False):
         logging.error('Uncommitted work found, blocking checkout')
@@ -396,51 +523,19 @@ def checkout(commit_id):
     working_dir_target = Path(wit_root_path).parent
     merge_override_tree(source_commit_id_path, working_dir_target)
     merge_override_tree(source_commit_id_path, staging_path)
-    ref_path = os.path.join(wit_root_path, 'references.txt')
+    ref_path = wit.wit_references_file
     if os.path.exists(ref_path):
-        master = parse_reference_file(ref_path).get('master')
-        if commit_id != master:
-            create_reference_file(wit_root_path, commit_id, master)
-        else:
-            create_reference_file(wit_root_path, commit_id, commit_id)
+        wit.update_references_file(commit_id, 'checkout')
 
 
-def traverse_history(images_path, commit):
-    history = {}
-    while commit != 'None':
-        commit_file = os.path.join(images_path, commit + '.txt')
-        parent_commit_id = parse_reference_file(commit_file).get('parent')
-        if parent_commit_id != 'None':
-            history[commit] = parent_commit_id
-        commit = parent_commit_id
-    return history
-
-
-def build_commit_history(wit_root_path, show_all):
-    images_path = os.path.join(wit_root_path, 'images')
-    head_commit_id = get_current_commit_id(images_path)
-    history = {}
-    if head_commit_id is None:
-        return history
-    history['Head'] = head_commit_id
-    ref_path = os.path.join(wit_root_path, 'references.txt')
-    if os.path.exists(ref_path):
-        master_commit_id = parse_reference_file(ref_path).get('master')
-        if master_commit_id == head_commit_id:
-            history['master'] = master_commit_id
-        elif show_all:
-            history['master'] = master_commit_id
-            history.update(traverse_history(images_path, master_commit_id))
-    history.update(traverse_history(images_path, head_commit_id))
-    return history
-
-
-def generate_graph(commits_history):
+def generate_graph(commits_history, branches, active_branch):
     graph = Digraph(name='wit_graph')
     for k, v in commits_history.items():
         graph.edge(k, v)
-        if k == 'master':
-            graph.node('master', shape="plaintext")
+        if k in branches:
+            graph.node(k, shape="plaintext")
+            if k == active_branch:
+                graph.node(k, label="{}*".format(k))
     graph.graph_attr['rankdir'] = 'LR'
     graph.edge_attr.update(arrowhead='vee', arrowsize='2')
     graph.node('Head', shape="plaintext")
@@ -449,14 +544,29 @@ def generate_graph(commits_history):
 
 
 def graph(show_all):
-    # Check whether current working directory is under wit repo
-    wit_root_path = find_repo(os.getcwd(), True)
-    if wit_root_path is None:
-        logging.error(
-            'Not a wit repository (or any of the parent directories): {}'.format('.wit'))
+    wit = WitRepo(os.getcwd())
+    try:
+        wit.validate_repo_at_path(os.getcwd(), True)
+    except WitException:
         return
-    commits_history = build_commit_history(wit_root_path, show_all)
-    generate_graph(commits_history)
+    commits_history = wit.build_commit_history(show_all)
+    branches = wit.get_branches()
+    active_branch = wit.get_active_branch()
+    generate_graph(commits_history, branches, active_branch)
+
+
+def branch(name):
+    branch_name = name[0]
+    try:
+        wit = WitRepo(os.getcwd())
+        wit.validate_repo_at_path(os.getcwd(), True)
+    except WitException:
+        return
+    # add row to references.txt : name = commit_id from head
+    try:
+        wit.update_branches(branch_name)
+    except WitException:
+        return
 
 
 def parse_input(argv):
@@ -498,7 +608,7 @@ def parse_input(argv):
 
     # create the parser for the "status" command
     parser_status = subparsers.add_parser(
-        Commends.STATUS, help="View repository status")
+        Commends.STATUS, help="View repository status.")
     parser_status.set_defaults(func=status)
 
     # create the parser for the "rm" command
@@ -531,6 +641,15 @@ def parse_input(argv):
                               help="show all commits history.")
     parser_graph.set_defaults(func=graph)
 
+    # create the parser for the "branch" command
+    parser_branch = subparsers.add_parser(
+        Commends.BRANCH, help="Create a branch tag.")
+    parser_branch.add_argument("name",
+                               metavar="name",
+                               nargs="+",
+                               help="branch name")
+    parser_branch.set_defaults(func=branch)
+
     if len(argv) == 0:
         parser.print_help()
         return
@@ -549,13 +668,15 @@ def parse_input(argv):
         checkout(args.commit_id)
     elif args.command == Commends.GRAPH:
         graph(args.all)
+    elif args.command == Commends.BRANCH:
+        branch(args.name)
 
 
 def configure_logging():
     file_handler = logging.FileHandler('error.log', 'a')
     file_handler.setLevel(logging.DEBUG)
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.ERROR)
+    console_handler.setLevel(logging.WARNING)
     formatter = logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s', datefmt='%d-%b-%y %H:%M:%S %p')
     file_handler.setFormatter(formatter)
