@@ -181,9 +181,7 @@ class WitRepo:
     def get_commit_file_data(self, filename):
         return dict(line.rstrip().split('=') for line in open(filename) if not line.startswith("#"))
 
-    def traverse_history(self, commit, visited=None):
-        if visited is None:
-            visited = set()
+    def traverse_history(self, commit, visited=set()):
         if commit in visited:
             return
         visited.add(commit)
